@@ -1,0 +1,1652 @@
+
+---
+title: "Fraud Detection"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+
+library(plyr)
+
+library(caret)
+
+library(ROSE)
+
+library(rpart)
+
+library(ryouready)
+
+library(klaR)
+
+library(gridExtra)
+
+library(ggpubr)
+
+library(randomForest)
+
+library(glmnet) 
+```
+
+## (1) Loading and reading the data.
+
+```{r}
+claims = read.table("/Users/linda/Desktop/eBay/All_Claims.txt",na.strings = c("", "NA")) 
+```
+
+## (2) The cleaning of the text part of the data has to be done in the terminal (see file "decode.R").
+
+## (3) Further cleaning of the data.  
+
+Removing duplicated rows 
+
+```{r}
+sum(duplicated(claims))
+
+claims = claims[!duplicated(claims),]
+```
+
+Summarizing the data
+
+```{r}
+str(claims)
+```
+
+Names of the variables
+
+```{r}
+nam = names(claims)
+
+nam
+```
+
+Levels of some columns.
+
+```{r}
+lfr = levels(claims$fraud_reason) 
+
+lm = levels(claims$make) 
+
+lcdm = levels(claims$claim_device_make)
+
+ldt = levels(claims$device_type)
+
+lmod = levels(claims$model)
+
+ldm = levels(claims$claim_device_model)
+```
+
+Number of levels of claims_device_make
+
+```{r}
+length(levels(claims$claim_device_make))
+```
+
+Levels of fraud_reason
+
+```{r}
+lfr
+```
+
+Levels of make
+
+```{r}
+lm
+```
+
+Levels of model
+
+```{r}
+lmod
+```
+
+Sparse columns.
+
+```{r}
+for (i in 1:ncol(claims)){
+  if((sum(is.na(claims[,i]))/nrow(claims))*100>50){print(names(claims)[i])}
+}
+```
+
+Creating a data frame with the factor columns, one with the integer columns and one with the numeric columns.
+
+```{r}
+factorcol = sapply(claims,is.factor)
+
+factorclaims = claims[,factorcol]
+
+intcol = sapply(claims,is.integer)
+
+intclaims = claims[,intcol]
+
+numcol = sapply(claims,is.numeric)
+
+numclaims = claims[,numcol]
+```
+
+Is the "fraud-reason" column empty?
+
+```{r}
+sum(!is.na(claims$fraud_reason))
+
+sum(is.na(claims$fraud_reason))
+```
+
+Since only `r sum(!is.na(claims$fraud_reason))` entries of the total `r nrow(claims)` have a fraud_reason explanation, only the `r sum(!is.na(claims$fraud_reason))*100/(nrow(claims))` percent of our data is labelled: semi supervised problem with skewed data.  
+
+Create two data sets, one for the !(is_na(fraud_claim)) and one for !(is.na(claim_rejection_reason)).
+
+```{r}
+fraud = claims %>% filter(!is.na(fraud_reason))
+
+rejected = claims %>% filter(!is.na(claim_rejection_reason))
+```
+
+Checking if one of the levels of fraud_reason is contained in one of the other columns by mistake.
+
+```{r}
+wrongcol = c()
+for (j in 1:ncol(claims)){
+    for (k in 1:6){
+      if(lfr[k]%in%claims[,j]){wrongcol = c(wrongcol,nam[j])}
+                 }
+}
+
+unique(wrongcol)
+```
+
+Distribution of the non-NAs levels in fraud_reason column.
+
+```{r}
+unique(fraud$fraud_reason)
+
+fraud$fraud_reason = as.character(fraud$fraud_reason)
+
+fraud$fraud_reason[fraud$fraud_reason == "Declared theft of delivered device (stolen out of post box)"] = "Theft declared but device delivered claim"
+
+fraud$fraud_reason[fraud$fraud_reason == "Inconsistent or not plausible claim declaration"] = "Inconsistent claim"
+
+fraud$fraud_reason[fraud$fraud_reason == "Multiple claims (2nd theft claim)"] = "Multiple claims (=2)"
+
+fraud$fraud_reason[fraud$fraud_reason == "Multiple claims (more than 3 claims in 2 years)"] = "Multiple claims (>3)"
+
+fraud$fraud_reason[fraud$fraud_reason == "Multiple claims (more than 3 claims in 2 years)"] = "Wrong device claim"
+
+fraud$fraud_reason[fraud$fraud_reason == "Other"] = "Other claim"
+
+ggplot(fraud, aes(x = fraud_reason)) + geom_bar(fill = "lightblue") + theme(axis.text.x = element_text(size  = 9, angle = 45, hjust = 1, vjust = 1)) + ggtitle("Distribution of non-NAs levels in fraud_reason column")
+```
+
+Distribution of the non-NAs levels in claim_rejection_reason column.
+
+```{r}
+length(levels(rejected$claim_rejection_reason))
+
+ggplot(rejected, aes(x = claim_rejection_reason)) + geom_bar(fill = "lightblue") + theme(axis.text.x = element_text(size  = 9, angle = 45, hjust = 1, vjust = 1)) + ggtitle("Distribution of non-NAs levels in claim_rejection_reason")
+```
+
+Distribution of levels in product_name column.
+
+```{r}
+levels(claims$product_name)
+
+claims$product_name = gsub("Cannot provide insured incident",NA,claims$product_name)
+claims$product_name = gsub("Handset in Manufacturer warranty",NA,claims$product_name)
+claims$product_name = gsub("Device not insured",NA,claims$product_name)
+claims$product_name = gsub("DROPPED_FROM_PERSON",NA,claims$product_name)
+claims$product_name = gsub("no cover: loss",NA,claims$product_name)
+claims$product_name = gsub("Incomplete Information",NA,claims$product_name)
+
+ggplot(claims, aes(x = product_name)) + geom_bar(fill = "lightblue") + theme(axis.text.x = element_text(size  = 8, angle = 45, hjust = 1, vjust = 1)) + ggtitle("Distribution of levels in product_name column")
+```
+
+Distribution of levels in contract_status column.
+
+```{r}
+length(levels(claims$contract_status))
+
+ggplot(claims, aes(x = contract_status)) + geom_bar(fill = "lightblue") + theme(axis.text.x = element_text(size  = 8, angle = 45, hjust = 1, vjust = 1)) + ggtitle("Distribution of levels in contract_status column")
+```
+
+Distribution of levels in claim_type column.
+
+```{r}
+length(levels(claims$claim_type))
+
+ggplot(claims, aes(x = claim_type)) + geom_bar(fill = "lightblue") + theme(axis.text.x = element_text(size  = 8, angle = 45, hjust = 1, vjust = 1)) + ggtitle("Distribution of levels in claim_type column")
+```
+
+Distribution of levels in status_before_closed column.
+
+```{r}
+length(levels(claims$status_before_closed))
+
+ggplot(claims, aes(x = status_before_closed)) + geom_bar(fill = "lightblue") + theme(axis.text.x = element_text(size  = 8, angle = 45, hjust = 1, vjust = 1)) + ggtitle("Distribution of levels in status_before_closed column")
+```
+
+Distribution of levels in claim_caused_by column.
+
+```{r}
+length(levels(claims$claim_caused_by))
+
+ggplot(claims, aes(x = claim_caused_by)) + geom_bar(fill = "lightblue") + theme(axis.text.x = element_text(size  = 8, angle = 45, hjust = 1, vjust = 1)) + ggtitle("Distribution of levels in claim_caused_by column")
+```
+
+Distribution of levels in Pictures.of.the.damaged.device.required. column.
+
+```{r}
+length(levels(claims$Pictures.of.the.damaged.device.required.))
+
+ggplot(claims, aes(x = Pictures.of.the.damaged.device.required.)) + geom_bar(fill = "lightblue") + theme(axis.text.x = element_text(size  = 8, angle = 45, hjust = 1, vjust = 1)) + ggtitle("Distribution of levels in Pictures.of.the.damaged.device.required column")
+```
+
+Distribution of levels in Poof.of.purchase.required. column.
+
+```{r}
+length(levels(claims$Proof.of.purchase.required.))
+
+ggplot(claims, aes(x = Proof.of.purchase.required.)) + geom_bar(fill = "lightblue") + theme(axis.text.x = element_text(size  = 8, angle = 45, hjust = 1, vjust = 1)) + ggtitle("Distribution of levels in Proof.of.purchase.required. column")
+```
+
+Distribution of levels in Was.a.Police.report.filed. column.
+
+```{r}
+length(levels(claims$Was.a.Police.report.filed.))
+
+ggplot(claims, aes(x = Was.a.Police.report.filed.)) + geom_bar(fill = "lightblue") + theme(axis.text.x = element_text(size  = 8, angle = 45, hjust = 1, vjust = 1)) + ggtitle("Distribution of levels in Was.a.Police.report.filed. column")
+```
+
+Distribution of levels in settlement_reason column.
+
+```{r}
+length(levels(claims$settlement_reason))
+
+ggplot(claims, aes(x = settlement_reason)) + geom_bar(fill = "lightblue") + theme(axis.text.x = element_text(size  = 8, angle = 45, hjust = 1, vjust = 1)) + ggtitle("Distribution of levels in settlement_reason column")
+```
+
+Distribution of levels in customer_language column.
+
+```{r}
+length(levels(claims$customer_language))
+
+levels(claims$customer_language)
+claims$customer_language = gsub("3ed_party",NA,claims$customer_language)
+claims$customer_language = gsub("Insured",NA,claims$customer_language)
+claims$customer_language = gsub("m",NA,claims$customer_language)
+
+ggplot(claims, aes(x = customer_language)) + geom_bar(fill = "lightblue") + theme(axis.text.x = element_text(size  = 8, angle = 45, hjust = 1, vjust = 1)) + ggtitle("Distribution of levels in customer_language column")
+```
+
+Distribution of levels in device_type column.
+
+```{r}
+levels(claims$device_type)
+
+claims$device_type = gsub("Sonstige",NA,claims$device_type)
+
+ggplot(claims, aes(x = device_type)) + geom_bar(fill = "lightblue") + theme(axis.text.x = element_text(size  = 8, angle = 45, hjust = 1, vjust = 1)) + ggtitle("Distribution of levels in device_type column")
+```
+
+Distribution of levels in claim_created_by column.
+
+```{r}
+length(levels(claims$claim_created_by))
+
+ggplot(claims, aes(x = claim_created_by)) + geom_bar(fill = "lightblue") + theme(axis.text.x = element_text(size  = 8, angle = 45, hjust = 1, vjust = 1)) + ggtitle("Distribution of levels in claim_created_by")
+```
+
+Distribution of levels in claim_caused_by column.
+
+```{r}
+length(levels(claims$claim_caused_by))
+
+ggplot(claims, aes(x = claim_caused_by)) + geom_bar(fill = "lightblue") + theme(axis.text.x = element_text(size  = 8, angle = 45, hjust = 1, vjust = 1)) + ggtitle("Distribution of levels in claim_caused_by column")
+```
+
+Distribution of values in claim_device_memory column.
+
+```{r}
+length(unique(claims$claim_device_memory))
+
+length(is.na(claims$claim_device_memory))
+
+claims_nonnas_memory = claims %>% filter(!is.na(claim_device_memory))
+
+claims_nonnas_memory %>% ggplot(aes(x = "", y = claim_device_memory)) + geom_boxplot() + xlab("Distribution of values in claim_device_memory column")
+
+# Discarding the largest outliers from data
+
+claims_little_memory = claims %>% filter(claim_device_memory<1000)
+
+# Box plot of claim_device_memory using the reduced dataset
+
+claims_little_memory %>% ggplot(aes(x = "", y = claim_device_memory)) + geom_boxplot() + xlab("Excluding the largest outliers")
+```
+
+Distribution of levels in make column.
+
+```{r}
+length(levels(claims$make))
+
+claims$make = gsub("iPhone","Apple",claims$make)
+claims$make = gsub("HUAWEI","Huawei",claims$make)
+claims$make = gsub("Local Brand","Local",claims$make)
+claims$make = gsub("sony","Sony",claims$make)
+claims$make = gsub("XPERIA","Sony",claims$make)
+claims$make = gsub("Galaxy","Samsung",claims$make)
+claims$make = gsub("I-surance","Insurance",claims$make)
+claims$make = gsub("ToBeFilled",NA,claims$make)
+claims$make = gsub("DUMMY",NA,claims$make)
+
+claims$make = factor(claims$make)
+
+length(levels(claims$make))
+
+ggplot(claims, aes(x = make)) + geom_bar(fill = "lightblue") + theme(axis.text.x = element_text(size  = 8, angle = 45, hjust = 1, vjust = 1)) + ggtitle("Distribution of levels in make column")
+```
+
+Distribution of levels in claim_device_make column before replacements
+
+```{r}
+tt <- table(claims$claim_device_make)
+
+ggplot(claims, aes(x = claim_device_make)) + geom_bar(fill = "lightblue") + theme(axis.text.x = element_text(size  = 2, angle = 90, hjust = 1, vjust = 1))  + rremove("y.text") + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks") + rremove("x.ticks") + annotate("text", x = c(50,350), y = c(18000,10000), label = c("Apple", "Samsung") , color="lightblue", size=10 , fontface="bold") 
+```
+
+Synthesis of the recurring patterns in claim_device_make column using Fuzzy Matching.  
+
+We will use the agrep function (base package) that uses in turn the Levenshtein distance to measure the distance between two strings.  
+The Levenshtein distance between two words is the minimum number of single-character edits (insertions, deletions or substitutions) required to change one word into the other.  
+It is zero if and only if the strings are equal.  
+If we pass to agrep as first argument a string "pattern" and as second argument a vector of strings x, the function answers to this question: can I transform pattern into a sub string of an element of x? So it is searching for matches "within" elements of x.
+
+Percentage of strings in claim_device_make that fuzzy match (Levenshtein distance=3) -Apple-
+
+```{r}
+length(unique(agrep("Apple", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 2)))*100/length(unique(claims$claim_device_make))
+```
+
+Strings in claim_device_make that fuzzy match (Levenshtein distance=2) -Apple-
+
+```{r}
+unique(agrep("Apple", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 2))
+```
+
+Percentage of strings in claim_device_make that fuzzy match (Levenshtein distance=2) -Yotaphone-
+
+```{r}
+length(unique(agrep("Yotaphone", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 2)))*100/length(unique(claims$claim_device_make))
+```
+
+Strings in claim_device_make that fuzzy match (Levenshtein distance=2) -Yotaphone-
+
+```{r}
+unique(agrep("Yotaphone",claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 2))
+```
+
+Percentage of strings in claim_device_make that fuzzy match (Levenshtein distance=2) -iPhone-
+
+```{r}
+length(unique(agrep("iPhone", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 2)))*100/length(unique(claims$claim_device_make))
+```
+
+Strings in claim_device_make that fuzzy match (Levenshtein distance=2) -iPhone-
+
+```{r}
+unique(agrep("iPhone", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 2))
+```
+
+Percentage of strings in claim_device_make that fuzzy match (Levenshtein distance=3) -Samsung-
+
+```{r}
+length(unique(agrep("Samsung", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 3)))*100/length(unique(claims$claim_device_make))
+```
+
+Strings in claim_device_make that fuzzy match (Levenshtein distance=3) -Samsung-
+
+```{r}
+unique(agrep("Samsung", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 3))
+```
+
+Percentage of strings in claim_device_make that fuzzy match (Levenshtein distance=.1) -Sony-
+
+```{r}
+length(unique(agrep("Sony", claims$claim_device_make, ignore.case = TRUE, value = TRUE)))*100/length(unique(claims$claim_device_make))
+```
+
+Strings in claim_device_make that fuzzy match (Levenshtein distance=.1) -Sony-
+
+```{r}
+unique(agrep("Sony", claims$claim_device_make, ignore.case = TRUE, value = TRUE))
+```
+
+Percentage of strings in claim_device_make that fuzzy match (Levenshtein distance=1) -htc-
+
+```{r}
+length(unique(agrep("htc", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1)))*100/length(unique(claims$claim_device_make))
+```
+
+Strings in claim_device_make that fuzzy match (Levenshtein distance=1) -htc-
+
+```{r}
+unique(agrep("htc", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1))
+```
+
+Percentage of strings in claim_device_make that fuzzy match (Levenshtein distance=1.5) -Huawei-
+
+```{r}
+length(unique(agrep("Huawei", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1.5)))*100/length(unique(claims$claim_device_make))
+```
+
+Strings in claim_device_make that fuzzy match (Levenshtein distance=1.5) -Huawei-
+
+```{r}
+unique(agrep("Huawei", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1.5))
+```
+
+Percentage of strings in claim_device_make that fuzzy match (Levenshtein distance=1) -Blackberry-
+
+```{r}
+length(unique(agrep("Blackberry", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1)))*100/length(unique(claims$claim_device_make))
+```
+
+Strings in claim_device_make that fuzzy match (Levenshtein distance=1) -Blackberry-
+
+```{r}
+unique(agrep("Blackberry", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1))
+```
+
+Percentage of strings in claim_device_make that fuzzy match (at Levenshtein distance=1) -I-surance-
+
+```{r}
+length(unique(agrep("I-surance", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1)))*100/length(unique(claims$claim_device_make))
+```
+
+Strings in claim_device_make that fuzzy match (at Levenshtein distance=1) -I-surance-
+
+```{r}
+unique(agrep("I-surance", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1))
+```
+
+Percentage of strings in claim_device_make that fuzzy match (at Levenshtein distance =0) -LG-
+
+```{r}
+length(unique(agrep("LG", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 0)))*100/length(unique(claims$claim_device_make))
+```
+
+Strings in claim_device_make that fuzzy match (at Levenshtein distance =0) -LG-
+
+```{r}
+unique(agrep("LG", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 0))
+```
+
+Percentage of strings in claim_device_make that fuzzy match (at Levenshtein distance =1) -Local-
+
+```{r}
+length(unique(agrep("Local", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 2)))*100/length(unique(claims$claim_device_make))
+```
+
+Strings in claim_device_make that fuzzy match (at Levenshtein distance =1) -Local-
+
+```{r}
+unique(agrep("Local", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1))
+```
+
+Percentage of strings in claim_device_make that fuzzy match (at Levenshtein distance =4) -Microsoft-
+
+```{r}
+length(unique(agrep("Microsoft", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 4)))*100/length(unique(claims$claim_device_make))
+```
+
+Strings in claim_device_make that fuzzy match (at Levenshtein distance =4) -Microsoft-
+
+```{r}
+unique(agrep("Microsoft", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 4))
+```
+
+Percentage of strings in claim_device_make that fuzzy match (at Levenshtein distance =3) -Motorola-
+
+```{r}
+length(unique(agrep("Motorola", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 3)))*100/length(unique(claims$claim_device_make))
+```
+
+Strings in claim_device_make that fuzzy match (at Levenshtein distance =3) -Motorola-
+
+```{r}
+unique(agrep("Motorola", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 3))
+```
+
+Percentage of strings in claim_device_make that fuzzy match (at Levenshtein distance =1) -Nokia-
+
+```{r}
+length(unique(agrep("Nokia", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1)))*100/length(unique(claims$claim_device_make))
+```
+
+Strings in claim_device_make that fuzzy match (at Levenshtein distance =1) -Nokia-
+
+```{r}
+unique(agrep("Nokia", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1))
+```
+
+Percentage of strings in claim_device_make that fuzzy match (at Levenshtein distance =2) -Sunrise-
+
+```{r}
+length(unique(agrep("Sunrise", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 2)))*100/length(unique(claims$claim_device_make))
+```
+
+Strings in claim_device_make that fuzzy match (at Levenshtein distance =2) -Sunrise-
+
+```{r}
+unique(agrep("Sunrise", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 2))
+```
+
+Percentage of elements of the column claim_device_make that are represented by the values previously chosen to apply the agrep function
+
+```{r}
+length(unique(agrep("Apple", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 2)))*100/length(unique(claims$claim_device_make))+
+length(unique(agrep("Yotaphone",claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 2)))*100/length(unique(claims$claim_device_make))+
+length(unique(agrep("iPhone", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 2)))*100/length(unique(claims$claim_device_make))+
+length(unique(agrep("Samsung", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 3)))*100/length(unique(claims$claim_device_make))+
+length(unique(agrep("Sony", claims$claim_device_make, ignore.case = TRUE, value = TRUE)))*100/length(unique(claims$claim_device_make))+
+length(unique(agrep("htc", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1)))*100/length(unique(claims$claim_device_make))+
+length(unique(agrep("Huawei", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1.5)))*100/length(unique(claims$claim_device_make))+
+length(unique(agrep("Blackberry", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1)))*100/length(unique(claims$claim_device_make))+
+length(unique(agrep("I-surance", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1)))*100/length(unique(claims$claim_device_make))+
+length(unique(agrep("LG", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 0)))*100/length(unique(claims$claim_device_make))+
+length(unique(agrep("Local", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1)))*100/length(unique(claims$claim_device_make))+
+length(unique(agrep("Microsoft", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 4)))*100/length(unique(claims$claim_device_make))+
+length(unique(agrep("Motorola", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 3)))*100/length(unique(claims$claim_device_make))+
+length(unique(agrep("Nokia", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1)))*100/length(unique(claims$claim_device_make))+
+length(unique(agrep("Sunrise", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 2)))*100/length(unique(claims$claim_device_make))
+```
+
+Replacing the fuzzy matching found with agrep with the corresponding "synthetic form" 
+
+```{r}
+claims$claim_device_make = gsub(pattern="\\(", replacement="",claims$claim_device_make) # removing left parentheses since they were giving errors with gsub
+
+claims$claim_device_make = gsub(pattern=")", replacement="",claims$claim_device_make)
+
+apple = unique(agrep("Apple", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.dist=2))
+for (i in 1:length(apple)){
+  claims$claim_device_make = gsub(apple[i],"Apple",claims$claim_device_make)
+}
+
+yota = unique(agrep("Yotaphone",claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 2))
+for (i in 1:length(yota)){
+  claims$claim_device_make = gsub(yota[i],"Yotaphone",claims$claim_device_make)
+}
+
+iphone = unique(agrep("iPhone", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 2))
+for (i in 1:length(iphone)){
+  claims$claim_device_make = gsub(iphone[i],"Apple",claims$claim_device_make)
+}
+
+sony = unique(agrep("Sony", claims$claim_device_make, ignore.case = TRUE, value = TRUE))
+for (i in 1:length(sony)){
+  claims$claim_device_make = gsub(sony[i],"Sony",claims$claim_device_make)
+}
+
+htc = unique(agrep("htc", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1))
+for (i in 1:length(htc)){
+  claims$claim_device_make = gsub(htc[i],"Htc",claims$claim_device_make)
+}
+huawei = unique(agrep("Huawei", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1.5))
+for (i in 1:length(huawei)){
+  claims$claim_device_make = gsub(huawei[i],"Huawei",claims$claim_device_make)
+}
+
+blackberry = unique(agrep("Blackberry", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1))
+for (i in 1:length(blackberry)){
+  claims$claim_device_make = gsub(blackberry[i],"Blackberry",claims$claim_device_make)
+}
+insurance = unique(agrep("I-surance", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1))
+for (i in 1:length(insurance)){
+  claims$claim_device_make = gsub(insurance[i],"Insurance",claims$claim_device_make)
+}
+
+lg = unique(agrep("LG", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 0))
+for (i in 1:length(lg)){
+  claims$claim_device_make = gsub(lg[i],"LG",claims$claim_device_make)
+}
+local = unique(agrep("Local", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1))
+for (i in 1:length(local)){
+  claims$claim_device_make = gsub(local[i],"Local",claims$claim_device_make)
+}
+
+microsoft = unique(agrep("Microsoft", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 4))
+for (i in 1:length(microsoft)){
+  claims$claim_device_make = gsub(microsoft[i],"Microsoft",claims$claim_device_make)
+}
+
+motorola = unique(agrep("Motorola", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 3))
+for (i in 1:length(motorola)){
+  claims$claim_device_make = gsub(motorola[i],"Motorola",claims$claim_device_make)
+}
+sunrise = unique(agrep("Sunrise", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 2))
+for (i in 1:length(sunrise)){
+  claims$claim_device_make = gsub(sunrise[i],"Sunrise",claims$claim_device_make)
+}
+
+nokia = unique(agrep("Nokia", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 1))
+for (i in 1:length(nokia)){
+  claims$claim_device_make = gsub(nokia[i],"Nokia",claims$claim_device_make)
+}
+
+samsung = unique(agrep("Samsung", claims$claim_device_make, ignore.case = TRUE, value = TRUE,max.distance = 3))
+for (i in 1:length(samsung)){
+  claims$claim_device_make = gsub(samsung[i],"Samsung",claims$claim_device_make,fixed=TRUE)
+}
+```
+
+Replacing the unmatched levels with NA 
+
+```{r}
+`%nin%` = Negate(`%in%`)
+
+for (i in 1:length(claims$claim_device_make)){
+    if(claims$claim_device_make[i]%nin%c("Apple","Yotaphone","Samsung","Sony","htc","Huawei","Blackberry","Insurance","LG","Local","Microsoft","Motorola","Sunrise","Nokia"))
+        claims$claim_device_make[i] = NA
+}
+```
+
+Distribution of levels in claim_device_make column after replacements
+
+```{r}
+ggplot(claims, aes(x = claim_device_make)) + geom_bar(fill = "lightblue") + theme(axis.text.x = element_text(size  = 8, angle = 45, hjust = 1, vjust = 1)) + ggtitle("Final distribution of levels in claim_device_make column") + rremove("ylab") + rremove("xlab") + rremove("grid")
+```
+
+Number of unique elements of model and of claim_device_model
+
+```{r}
+length(unique(claims$model))
+
+length(unique(claims$claim_device_model))
+```
+
+Synthesis of recurring patterns in model column using fuzzy matching.
+
+```{r}
+claims$model = gsub("[()]", "", claims$model)
+```
+
+Percentage of strings in model that fuzzy match (Levenshtein distance=3) -iPhone-
+
+```{r}
+length(unique(agrep("iPhone", claims$model, ignore.case = FALSE, value = TRUE,max.distance = 3)))*100/length(unique(claims$model))
+```
+
+Strings in model that fuzzy match (Levenshtein distance=3) -iPhone-
+
+```{r}
+unique(agrep("iPhone", claims$model, ignore.case = FALSE, value = TRUE,max.distance = 3))
+```
+
+Percentage of strings in model that fuzzy match (Levenshtein distance=2) -Xperia-
+
+```{r}
+length(unique(agrep("Xperia", claims$model, ignore.case = TRUE, value = TRUE,max.distance = 2)))*100/length(unique(claims$model))
+```
+
+Strings in model that fuzzy match (Levenshtein distance=2) -Xperia-
+
+```{r}
+unique(agrep("Xperia", claims$model, ignore.case = TRUE, value = TRUE,max.distance = 2))
+```
+
+Percentage of strings in model that fuzzy match (Levenshtein distance=2) -Galaxy-
+
+```{r}
+length(unique(agrep("Galaxy", claims$model, ignore.case = TRUE, value = TRUE,max.distance = 2)))*100/length(unique(claims$model))
+```
+
+Strings in model that fuzzy match (Levenshtein distance=2) -Galaxy-
+
+```{r}
+unique(agrep("Galaxy", claims$model, ignore.case = TRUE, value = TRUE,max.distance = 2))
+```
+
+Percentage of strings in model that fuzzy match (Levenshtein distance=3) -Samsung-
+
+```{r}
+length(unique(agrep("Samsung", claims$model, ignore.case = TRUE, value = TRUE,max.distance = 3)))*100/length(unique(claims$model))
+```
+
+Strings in model that fuzzy match (Levenshtein distance=3) -Samsung-
+
+```{r}
+unique(agrep("Samsung", claims$model, ignore.case = TRUE, value = TRUE,max.distance = 3))
+```
+
+Percentage of strings in model that fuzzy match (Levenshtein distance=0) -One-
+
+```{r}
+length(unique(agrep("One", claims$model, ignore.case = FALSE, value = TRUE,max.distance = 0)))*100/length(unique(claims$model))
+```
+
+Strings in model that fuzzy match (at Levenshtein distance=0) -One-
+
+```{r}
+unique(agrep("One", claims$model, ignore.case = FALSE, value = TRUE,max.distance = 0))
+```
+
+Percentage of strings in model that fuzzy match (at Levenshtein distance=1) -iPad-
+
+```{r}
+length(unique(agrep("iPad", claims$model, ignore.case = TRUE, value = TRUE,max.distance = 1)))*100/length(unique(claims$model))
+```
+
+Strings in model that fuzzy match (at Levenshtein distance=1) -iPad-
+
+```{r}
+unique(agrep("iPad", claims$model, ignore.case = TRUE, value = TRUE,max.distance = 1))
+```
+
+Percentage of strings in model that fuzzy match (at Levenshtein distance =1) -Lumia-
+
+```{r}
+length(unique(agrep("Lumia", claims$model, ignore.case = TRUE, value = TRUE,max.distance = 1)))*100/length(unique(claims$model))
+```
+
+Strings in model that fuzzy match (at Levenshtein distance =1) -Lumia-
+
+```{r}
+unique(agrep("Lumia", claims$model, ignore.case = TRUE, value = TRUE,max.distance = 1))
+```
+
+Percentage of elements of the column model that are represented by the values previously chosen to apply the agrep function
+
+```{r}
+length(unique(agrep("Xperia", claims$model, ignore.case = TRUE, value = TRUE,max.distance = 2)))*100/length(unique(claims$model))+
+length(unique(agrep("Galaxy", claims$model, ignore.case = TRUE, value = TRUE,max.distance = 2)))*100/length(unique(claims$model))+
+length(unique(agrep("Samsung", claims$model, ignore.case = TRUE, value = TRUE,max.distance = 3)))*100/length(unique(claims$model))+
+length(unique(agrep("One", claims$model, ignore.case = FALSE, value = TRUE,max.distance = 0)))*100/length(unique(claims$model))+
+length(unique(agrep("iPad", claims$model, ignore.case = TRUE, value = TRUE,max.distance = 1)))*100/length(unique(claims$model))+
+length(unique(agrep("Lumia", claims$model, ignore.case = TRUE, value = TRUE,max.distance = 1)))*100/length(unique(claims$model))+
+length(unique(agrep("iPhone", claims$model, ignore.case = FALSE, value = TRUE,max.distance = 3)))*100/length(unique(claims$model))
+```
+
+Replacing the fuzzy matching found with agrep with the corresponding "synthetic form" 
+
+```{r}
+# grepl returns TRUE if a string contains the pattern, otherwise FALSE; if the parameter is a string vector, returns a logical vector (match or not for each element of the vector).
+
+claims$model[grepl("iPhone", claims$model)] = "iPhone"
+
+XPERIA = unique(agrep("Xperia",claims$model, ignore.case = TRUE, value = TRUE,max.distance = 2))
+for (i in 1:length(XPERIA)){
+  claims$model = gsub(XPERIA[i],"Xperia",claims$model)
+}
+
+GALAXY = unique(agrep("Galaxy", claims$model, ignore.case = TRUE, value = TRUE,max.distance = 2))
+for (i in 1:length(GALAXY)){
+  claims$model = gsub(GALAXY[i],"Galaxy",claims$model)
+}
+
+SAMSUNG = unique(agrep("Samsung", claims$model, ignore.case = TRUE, value = TRUE,max.distance = 3))
+for (i in 1:length(SAMSUNG)){
+  claims$model = gsub(SAMSUNG[i],"Galaxy",claims$model,fixed=TRUE)
+}
+
+ONE = unique(agrep("One", claims$model, ignore.case = FALSE, value = TRUE,max.distance = 0))
+for (i in 1:length(ONE)){
+  claims$model = gsub(ONE[i],"One",claims$model)
+}
+
+IPAD = unique(agrep("iPad", claims$model, ignore.case = TRUE, value = TRUE,max.distance = 1))
+for (i in 1:length(IPAD)){
+  claims$model = gsub(IPAD[i],"iPad",claims$model)
+}
+
+LUMIA = unique(agrep("Lumia", claims$model, ignore.case = TRUE, value = TRUE,max.distance = 1))
+for (i in 1:length(LUMIA)){
+  claims$cmodel = gsub(LUMIA[i],"Lumia",claims$model)
+}
+```
+
+Replacing the unmatched levels with NA
+
+```{r}
+`%nin%` = Negate(`%in%`)
+
+for (i in 1:length(claims$model)){
+    if(claims$model[i]%nin%c("iPhone","Xperia","Galaxy","Samsung","iPad","One","Lumia"))
+      claims$model[i] = NA
+}
+```
+
+Percentage of NAs in the model column
+
+```{r}
+sum(is.na(claims$model))*100/length(claims$model)
+```
+
+Distribution of levels in model column after replacements
+
+```{r}
+ggplot(claims, aes(x = model)) + geom_bar(fill = "lightblue") + theme(axis.text.x = element_text(size  = 8, angle = 45, hjust = 1, vjust = 1)) + ggtitle("Distribution of levels in model column after replacement")
+```
+
+Cleaning the columns customer_number and contract_number
+
+```{r}
+levels(claims$customer_number) = gsub(".\"", NA, levels(claims$customer_number), fixed=TRUE)
+
+levels(claims$customer_number) = gsub("+41765817477\"", NA, levels(claims$customer_number), fixed=TRUE)
+
+levels(claims$customer_number) = gsub("079 269 88 64\"", NA, levels(claims$customer_number), fixed=TRUE)
+
+claims$customer_number = as.character(claims$customer_number)
+
+claims$customer_number[grepl("e", claims$customer_number)] = NA
+
+claims$customer_number[grepl("E", claims$customer_number)] = NA
+
+claims$customer_number[grepl("a", claims$customer_number)] = NA
+
+claims$customer_number[grepl("a", claims$customer_number)] = NA
+
+sum(is.na(claims$customer_number))*100/length(claims$customer_number)
+
+claims$contract_number = as.character(claims$contract_number)
+
+claims$contract_number[grepl("A", claims$contract_number)] = NA
+
+claims$contract_number[grepl("a", claims$contract_number)] = NA
+
+claims$contract_number[grepl("n", claims$contract_number)] = NA
+
+claims$contract_number[grepl("u", claims$contract_number)] = NA
+
+claims$contract_number[grepl("M", claims$contract_number)] = NA
+
+claims$contract_number[grepl("P", claims$contract_number)] = NA
+
+claims$contract_number[grepl("e", claims$contract_number)] = NA
+
+claims$contract_number[grepl("r", claims$contract_number)] = NA
+
+claims$contract_number[grepl("t", claims$contract_number)] = NA
+
+claims$contract_number[grepl("s", claims$contract_number)] = NA
+
+sum(is.na(claims$contract_number))*100/length(claims$contract_number)
+```
+
+New table with only some of the columns of claims
+
+```{r}
+fraud_data = data.frame("claim_id"=claims$claim_id,"claim_number"=claims$claim_number,"customer_number"=claims$customer_number,"contract_number"=claims$contract_number,"claim_date"=claims$claim_date,"claim_type"=claims$claim_type,"device_type"=claims$device_type,"product_name"=claims$product_name,"make"=claims$make,"claim_device_make"=claims$claim_device_make,
+"model"=claims$model,"claim_device_memory"=claims$claim_device_memory,"device_creation_date"=claims$device_creation_date,"city"=claims$city,"customer_language"=claims$customer_language,"reported_at"=claims$reported_at,"claim_created_by"=claims$claim_created_by,"what_happened"=claims$what_happened,"claim_scene"=claims$claim_scene,"claim_caused_by"=claims$claim_caused_by,"pictures_damage_required"=claims$Pictures.of.the.damaged.device.required.,"proof_purchase_required"=claims$Proof.of.purchase.required.,"police_report"=claims$Was.a.Police.report.filed.,"contract_status"=claims$contract_status,"settlement_reason"=claims$settlement_reason,"status_before_closed"=claims$status_before_closed,"claim_rejection_reason"=claims$claim_rejection_reason,"fraud_reason"=claims$fraud_reason)
+```
+
+Removing duplicated rows
+
+```{r}
+sum(duplicated(fraud_data))
+
+fraud_data = fraud_data[!duplicated(fraud_data),]
+```
+
+Summarizing the data
+
+```{r}
+str(fraud_data)
+```
+
+## (4) A first "by hand" detection of frauds by creating a binary column "is_fraud" to be filled following some criteria.  
+
+```{r}
+fraud_data$is_fraud = rep(0, nrow(fraud_data))
+```
+
+Distribution of nonNAs levels of fraud_reason
+
+```{r}
+nonnasFRfrauddata = fraud_data %>% filter(!is.na(fraud_reason))
+
+ggplot(nonnasFRfrauddata, aes(x = fraud_reason)) + geom_bar(fill = "lightblue") + theme(axis.text.y = element_text(size  = 10, hjust = 1, vjust = 1)) + theme(axis.text.x = element_text(size  = 10, hjust = 1, vjust = 1)) + rremove("grid") + rremove("xlab") + coord_flip() + rremove("xlab") + rremove("ylab")
+```
+
+Distribution of nonNAs levels of claim_rejection_reason
+
+```{r}
+levels(fraud_data$claim_rejection_reason)
+
+nonnasCRRfrauddata = fraud_data %>% filter(!is.na(claim_rejection_reason))
+
+ggplot(nonnasCRRfrauddata, aes(x = claim_rejection_reason)) + geom_bar(fill = "lightblue") + theme(axis.text.y = element_text(size  = 10, hjust = 1, vjust = 1)) + theme(axis.text.x = element_text(size  = 10, hjust = 1, vjust = 1)) + rremove("grid") + coord_flip() + rremove("x.ticks")+ rremove("y.ticks") + rremove("xlab") + rremove("ylab")
+```
+
+Distribution of levels of status_before_closed
+
+```{r}
+levels(fraud_data$status_before_closed)
+
+ggplot(fraud_data, aes(x = status_before_closed)) + geom_bar(fill = "lightblue") + theme(axis.text.y = element_text(size  = 10, hjust = 1, vjust = 1)) + theme(axis.text.x = element_text(size  = 10, hjust = 1, vjust = 1)) + rremove("ylab") + rremove("grid") + rremove("xlab") + coord_flip() + rremove("x.ticks")+ rremove("y.ticks")
+```
+
+Distribution of levels of claim_type
+
+```{r}
+levels(fraud_data$claim_type)
+
+ggplot(fraud_data, aes(x = claim_type)) + geom_bar(fill = "lightblue") + theme(axis.text.y = element_text(size  = 10, hjust = 1, vjust = 1)) + theme(axis.text.x = element_text(size  = 10, hjust = 1, vjust = 1)) + rremove("ylab") + rremove("grid") + rremove("xlab") + coord_flip() + rremove("x.ticks") + rremove("y.ticks")
+```
+
+Criterion 1: all the rows that have entries in fraud_reason are fraud
+
+```{r}
+fraud_data$is_fraud = ifelse(!is.na(fraud_data$fraud_reason), 1, 0)
+```
+
+Criterion 2: if the entry of claim_rejection_reason is "fraud" or "incomplete information" or "misinterpretation/inconsistency" or "theft not reported to the police in time (if theft)" or "previously unsuccessful claim" then it is fraud 
+
+```{r}
+fraud_data$claim_rejection_reason = as.character(fraud_data$claim_rejection_reason)
+
+fraud_data$is_fraud[fraud_data$claim_rejection_reason=="Theft not reported to Police in Time (if Theft)"]=1
+fraud_data$is_fraud[fraud_data$claim_rejection_reason=="Fraud"]=1
+fraud_data$is_fraud[fraud_data$claim_rejection_reason=="Incomplete Information"]=1
+fraud_data$is_fraud[fraud_data$claim_rejection_reason=="Misrepresentation / Inconsistency"]=1
+fraud_data$is_fraud[fraud_data$claim_rejection_reason=="Theft not reported to Police in Time (if Theft)"]=1
+```
+
+Criterion 3: if the entry of status_before_closed is "auto_abandoned" or "resolved_denied" and claim_rejection_reason has an entry then it is a fraud 
+
+```{r}
+fraud_data$status_before_closed = as.character(fraud_data$status_before_closed)
+
+fraud_data$is_fraud[fraud_data$status_before_closed=="AUTO_ABANDONED"&!is.na(fraud_data$claim_rejection_reason)]=1
+
+fraud_data$is_fraud[fraud_data$status_before_closed=="RESOLVED_DENIED"&!is.na(fraud_data$claim_rejection_reason)]=1
+```
+
+Criterion 4: if the entry of claim_type is "stolen" and the entry of police_report column is "No" then it is a fraud
+
+```{r}
+fraud_data$claim_type = as.character(fraud_data$claim_type)
+
+fraud_data$police_report = as.character(fraud_data$police_report)
+
+fraud_data$is_fraud[fraud_data$claim_type=="STOLEN"&fraud_data$police_report=="No"]=1
+```
+
+Final fraud_data.
+
+```{r}
+fraud_data$claim_type = factor(fraud_data$claim_type)
+
+fraud_data$police_report = factor(fraud_data$police_report)
+
+fraud_data$status_before_closed = factor(fraud_data$status_before_closed)
+
+fraud_data$claim_rejection_reason = factor(fraud_data$claim_rejection_reason)
+
+fraud_data$is_fraud = factor(fraud_data$is_fraud)
+
+fraud_data$fraud_reason = as.character(fraud_data$fraud_reason)
+
+fraud_data$fraud_reason[is.na(fraud_data$fraud_reason)] = "unknown"
+
+fraud_data$police_report = as.character(fraud_data$police_report)
+
+fraud_data$police_report[is.na(fraud_data$police_report)] = "unknown"
+
+fraud_data$claim_rejection_reason = as.character(fraud_data$claim_rejection_reason)
+
+fraud_data$claim_rejection_reason[is.na(fraud_data$claim_rejection_reason)] = "unknown"
+
+fraud_data$police_report = factor(fraud_data$police_report)
+
+fraud_data$fraud_reason = factor(fraud_data$fraud_reason)
+
+fraud_data$claim_rejection_reason = factor(fraud_data$claim_rejection_reason)
+
+str(fraud_data)
+```
+
+The number of frauds in the fraud_data set increased from `r sum(!is.na(claims$fraud_reason))*100/(nrow(claims))` percent to `r sum(fraud_data$is_fraud==1)*100/(nrow(fraud_data))` percent after the "by hand" detection of frauds.  
+
+## (5) Can machine learning find and characterize other frauds?   
+
+The by hand detection of frauds led us to discover `r sum(fraud_data$is_fraud==1)*100/(nrow(fraud_data))` percent of frauds. Since the business department of the insurance is expecting to double the percentage of frauds, we want to find out whether we can double this percentage using some machine learning algorithms.  
+
+We will start using a decision tree algorithm by splitting the data set into a training and a test set.  
+
+The algorithm of decision trees works as follows. We assume that we have a set T of training samples. Let the
+possible classes be denoted as ${C_1, C_2, ..., C_k}$. There are three possibilities depending on the content of the set $T$.  
+1. $T$ contains one or more samples, all belonging to a single class $C_j$. The decision tree for T is a leaf identifying class $C_j$.  
+2. $T$ contains no samples. The decision tree is again a leaf but the class to be associated with the leaf must be determined from information other than T, e.g. the most frequent class as the parent of the given node.  
+3. $T$ contains samples that belong to a mixture of classes. It must be refined into subsets of samples that are closer to being a single-class collection of samples. Based on the value of a single attribute, an appropriate test that has a certain number of mutually exclusive outcomes ${O_1, O_2, ..., O_n}$ is chosen. $T$ is partitioned into subsets $T_1, T_2,...,T_n$, where $T_i$ contains all the samples in $T$ that have outcome $O_i$ of the chosen test.  
+The decision tree for $T$ consists of a decision node identifying the test and one branch for each possible outcome. The successive division of the set of training samples proceeds until all the subsets consist of sample belonging to a single class. The choice of test at a given node has to minimize the number of test that will allow a sample to be classified.
+
+Training phase: training data (with paired input/output) are fed to the model to train it.  
+Test phase: test data are used to estimate the accuracy of the selected approach.   
+The function createDataPartition can be used to create splits of the data in such a way that, if the y argument to this function is a factor, the random sampling occurs within each class and should preserve the overall class distribution of the data.  
+The 70% of the data will go to the training set.
+
+```{r}
+set.seed(123) 
+
+trainIndex = createDataPartition(fraud_data$is_fraud, p = .7, list = FALSE)
+
+# list = FALSE avoids returns the data as a list, times = 1 creates only one split
+
+imbal_fraud_train = fraud_data[trainIndex,]
+
+imbal_fraud_test = fraud_data[-trainIndex,]
+
+cat("Percentage of frauds in imbal_fraud_train","\n")
+
+sum(imbal_fraud_train$is_fraud==1)*100/(nrow(imbal_fraud_train))
+
+cat("\n","Percentage of frauds in imbal_fraud_test","\n")
+
+sum(imbal_fraud_test$is_fraud==1)*100/(nrow(imbal_fraud_test))
+
+cat("\n","Proportion table for frauds in imbal_fraud_train","\n")
+
+prop.table(table(imbal_fraud_train$is_fraud))
+
+cat("\n", "Proportion table for frauds in imbal_fraud_test","\n")
+
+prop.table(table(imbal_fraud_test$is_fraud))
+```
+
+We use the decision tree algorithm on the imbalanced training data set and check the performance of its the prediction on the test set by measuring recall, the area under the ROC curve and the false positive rate.  
+We are interested in maximizing "recall" = R = TP/(TP+FN) = TP/(# of real positives), also called "true positive rate", because we want to have zero false negative, i.e. we want to be able to detect all the frauds.  We are also interested in the "false positive rate", also called inverse recall, because we want to find also "new frauds", i.e. frauds not discovered by the "by hand" process, using this machine learning algorithm.  
+
+For our decision tree algorithm we will have a "true positive rate" = TPR =  TP/(TP+FN) = TP/(# of real positives) and a "false positive rate" = FPR =  FP/(TN+FP) = FP/(# of real negatives), namely a point in the so called ROC space. By drawing a line from (0,0) to this point and from there to (1,1) in the ROC space we find the ROC curve. In general (but not in our case), we get the best performance, i.e. TPR=1 (FN=0) and FPR=0 (FP=0), when the area under this roc curve is 1, and we get the worst performance when the area is 0.5. Note that an AUC around 0.5 means that the curve is close to the 45 degrees diagonal of the ROC space and so that the true positive rate is almost equal to the false positive rate, i.e. that we are simply randomly guessing a class for each observation.  
+
+```{r}
+treeimb = rpart(is_fraud ~ ., data = imbal_fraud_train )
+
+pred.treeimb = predict(treeimb, newdata = imbal_fraud_test)
+
+cat("\n","recall:", "\n", "\n")
+  
+print(accuracy.meas(imbal_fraud_test$is_fraud, pred.treeimb[,2])$recall)
+
+cat("\n")
+  
+print(roc.curve(imbal_fraud_test$is_fraud, pred.treeimb[,2], plotit = TRUE))
+  
+cat("\n","confusion matrix","\n")
+  
+tbimb = table(pred.treeimb[,2], imbal_fraud_test$is_fraud)
+  
+print(tbimb)
+
+cat("\n","false positive percentage","\n", "\n")
+
+print((tbimb[2,1]/sum(tbimb))*100)
+```
+
+In this case the recall is really high, since recall: `r accuracy.meas(imbal_fraud_test$is_fraud, pred.treeimb[,2])$recall` but the false positive percentage is really low. Maybe this is done to the fact that decision tree are prone to over fitting and so that we are closely following the particular split in training and testing data. Then it is better to use a k-folds cross validation procedure. Indeed, by default the createDataPartition function creates a single partition in training and test set of the original data. If we divide the fraud data into 5 folds and then we do 5 steps, in each of which we fix one of the folds as test set and the other 4 as training set, we can check how the recall, the area under the ROC curve and the false positive percentage of the decision tree algorithm vary depending on the particular folds chosen as train and test.   
+
+```{r}
+#Randomly shuffle the data
+
+fraud_data = fraud_data[sample(nrow(fraud_data)),]
+
+#Create 5 equally size folds
+
+folds = cut(seq(1,nrow(fraud_data)),breaks=5,labels=FALSE)
+
+#Perform 5 fold cross validation
+
+aucimb = c()
+
+fppimb = c()
+
+rimb = c()
+
+for(i in 1:5){
+  
+  #Segementing my data by fold using the which() function 
+  
+  testIndexes = which(folds==i,arr.ind=TRUE)
+  
+  testData = fraud_data[testIndexes, ]
+  
+  trainData = fraud_data[-testIndexes, ]
+  
+  treeimb2 = rpart(is_fraud ~ ., data = trainData)
+  
+  pred.treeimb2 = predict(treeimb2, newdata = testData)
+  
+  cat("\n","recall:", "\n", "\n")
+  
+  print(accuracy.meas(testData$is_fraud, pred.treeimb2[,2])$recall)
+  
+  cat("\n")
+  
+  print(roc.curve(testData$is_fraud, pred.treeimb2[,2], plotit = TRUE))
+  
+  cat("\n","confusion matrix","\n","\n")
+  
+  tbimb = table(pred.treeimb2[,2], testData$is_fraud)
+  
+  print(tbimb)
+  
+  legend("topleft", c("fold"), i)
+  
+  cat("\n","false positive percentage","\n", "\n")
+  
+  print((tbimb[2,1]/sum(tbimb))*100)
+  
+  rimb = c(rimb, accuracy.meas(testData$is_fraud, pred.treeimb2[,2])$recall)
+  
+  aucimb = c(aucimb,roc.curve(testData$is_fraud, pred.treeimb2[,2], plotit = FALSE)$auc)
+  
+  fppimb = c(fppimb,(tbimb[2,1]/sum(tbimb))*100)
+}
+
+cat("\n","average recall", mean(rimb), "\n")
+
+cat("\n", "average AUC", mean(aucimb), "\n")
+
+cat("\n", "average false positive percentage", mean(fppimb))
+```
+
+The results that we obtain by averaging recall, AUC and false positive percentage over 5 folds cross validation are pretty close to the previous one. So it does not seem that the first tree was over fitting the training set that it was using to learn. But maybe the false positive percentage is so low even averaging it among 5 folds with cross validation because our training sets are highly imbalanced and so the classifier is biased towards majority class, i.e. towards the non-frauds.  
+We can use sampling methods in order to modify an imbalanced data set into a balanced distribution by altering the size of original data set and by providing the same proportion of balance.  
+To create a balanced data set we will try two ways. First we will use the function ovun.sample of the ROSE package with method = "over", that will over sample with replacement the minority class, namely the class of frauds. Then we will use the function ovun.sample of the ROSE package with method = "under", that will under sample without replacement the majority class, namely the class of non-frauds. In both cases we will obtain a new data set with around 50% of fraud cases and 50% of non-fraud cases.
+
+```{r}
+fraud_balanced_over = ovun.sample(is_fraud ~ ., data = fraud_data, method = "over", p=.5)$data
+
+# p .5 means half fraud and half non-frauds
+
+cat("Proportion table for frauds in the data set balanced with method over","\n")
+
+prop.table(table(fraud_balanced_over$is_fraud))
+
+cat("\n","number of observations in the data set obtained with method over","\n","\n")
+
+nrow(fraud_balanced_over)
+
+fraud_balanced_under = ovun.sample(is_fraud ~ ., data = fraud_data,method = "under", p=.5)$data
+
+cat("\n","Proportion table for frauds in the training data set balanced with method under","\n")
+
+prop.table(table(fraud_balanced_under$is_fraud))
+
+cat("\n","number of observations in training data set obtained with method under","\n", "\n")
+
+nrow(fraud_balanced_under)
+```
+
+The number of observations in the data set obtained with under sampling is really low, so it will led to under fitting.  
+
+Let's now use these two new balanced data sets to run a 5 folds cross validation for a decision tree for each, checking in which of the two balanced cases the overall performance (including the false positive) improves more with respect to the 5 folds cross validation applied to the imbalanced training data set of before.  
+
+5 folds cv with fraud_balanced_over.
+
+```{r}
+fraud_balanced_over = fraud_balanced_over[sample(nrow(fraud_balanced_over)),]
+
+folds = cut(seq(1,nrow(fraud_balanced_over)),breaks=5,labels=FALSE)
+
+aucover = c()
+
+fppover = c()
+
+rover = c()
+
+for(i in 1:5){
+  
+  testIndexes = which(folds==i,arr.ind=TRUE)
+  
+  testData = fraud_balanced_over[testIndexes, ]
+  
+  trainData = fraud_balanced_over[-testIndexes, ]
+  
+  treeover = rpart(is_fraud ~ ., data = trainData)
+  
+  pred.treeover = predict(treeover, newdata = testData)
+  
+  cat("\n","recall:", "\n", "\n")
+  
+  print(accuracy.meas(testData$is_fraud, pred.treeover[,2])$recall)
+  
+  cat("\n")
+  
+  print(roc.curve(testData$is_fraud, pred.treeover[,2], plotit = TRUE))
+  
+  cat("\n","confusion matrix","\n","\n")
+  
+  tbover = table(pred.treeover[,2], testData$is_fraud)
+  
+  print(tbover)
+  
+  legend("topleft", c("fold"), i)
+  
+  cat("\n","false positive percentage","\n", "\n")
+  
+  print((tbover[2,1]/sum(tbover))*100)
+  
+  rover = c(rover, accuracy.meas(testData$is_fraud, pred.treeover[,2])$recall)
+  
+  aucover = c(aucover,roc.curve(testData$is_fraud, pred.treeover[,2], plotit = FALSE)$auc)
+  
+  fppover = c(fppover,(tbover[2,1]/sum(tbover))*100)
+}
+
+cat("\n","average recall", mean(rover), "\n")
+
+cat("\n", "average AUC", mean(aucover), "\n")
+
+cat("\n", "average false positive percentage", mean(fppover))
+```
+
+5 folds cv with fraud_balanced_under.
+
+```{r}
+fraud_balanced_under = fraud_balanced_under[sample(nrow(fraud_balanced_under)),]
+
+folds = cut(seq(1,nrow(fraud_balanced_under)),breaks=5,labels=FALSE)
+
+aucunder = c()
+
+fppunder = c()
+
+runder = c()
+
+for(i in 1:5){
+  
+  testIndexes = which(folds==i,arr.ind=TRUE)
+  
+  testData = fraud_balanced_under[testIndexes, ]
+  
+  trainData = fraud_balanced_under[-testIndexes, ]
+  
+  treeunder = rpart(is_fraud ~ ., data = trainData)
+  
+  pred.treeunder = predict(treeunder, newdata = testData)
+  
+  cat("\n","recall:", "\n", "\n")
+  
+  print(accuracy.meas(testData$is_fraud, pred.treeunder[,2])$recall)
+  
+  cat("\n")
+  
+  print(roc.curve(testData$is_fraud, pred.treeunder[,2], plotit = TRUE))
+  
+  cat("\n","confusion matrix","\n","\n")
+  
+  tbunder = table(pred.treeunder[,2], testData$is_fraud)
+  
+  print(tbunder)
+  
+  legend("topleft", c("fold"), i)
+  
+  cat("\n","false positive percentage","\n", "\n")
+  
+  print((tbunder[2,1]/sum(tbunder))*100)
+  
+  runder = c(runder, accuracy.meas(testData$is_fraud, pred.treeunder[,2])$recall)
+  
+  aucunder = c(aucunder,roc.curve(testData$is_fraud, pred.treeunder[,2], plotit = FALSE)$auc)
+  
+  fppunder = c(fppunder,(tbunder[2,1]/sum(tbunder))*100)
+}
+
+cat("\n","average recall", mean(runder), "\n")
+
+cat("\n", "average AUC", mean(aucunder), "\n")
+
+cat("\n", "average false positive percentage", mean(fppunder))
+```
+
+The under sampling technique, due to the very low number of observations in the training data set, led us to a very low performance, with very low recall and AUC.  
+
+The oversampling technique instead led us to a very good performance: with the 5 folds cross validation we have always obtained a recall of 1, namely we have been able to always detect all the "old frauds" on the test set, and we have obtained an average false positive percentage of `r mean(fppover)` on the test set. This means that we have been able to find out all the previous frauds on the test set and also to discover `r mean(fppover)` percent of "new frauds" that have been ignored by the "by hand" detection method.  
+
+Then the best method in order to find all the "old frauds" and to discover "new frauds" using a decision tree classifier is that of balancing the fraud_data set by over sampling the frauds. We can do a "visual check" for the around 4 percent of false positives discovered in the test data set in order to compare them with the true positives of the test set, namely with the old frauds.
+
+```{r}
+fraud_balanced_over = ovun.sample(is_fraud ~ ., data = fraud_data, method = "over", p=.5)$data
+
+cat("\n","number of rows of the balanced data set:", "\n", "\n")
+
+nrow(fraud_balanced_over)
+
+trainIndex = createDataPartition(fraud_balanced_over$is_fraud, p = .7, list = FALSE)
+
+fraud_balanced_train = fraud_balanced_over[trainIndex,]
+
+fraud_balanced_test = fraud_balanced_over[-trainIndex,]
+
+treefinal = rpart(is_fraud ~ ., data = fraud_balanced_train)
+  
+pred.treefinal = predict(treefinal, newdata = fraud_balanced_test)
+  
+cat("\n","recall:", "\n", "\n")
+  
+print(accuracy.meas(fraud_balanced_test$is_fraud, pred.treefinal[,2])$recall)
+  
+cat("\n")
+  
+print(roc.curve(fraud_balanced_test$is_fraud, pred.treefinal[,2], plotit = TRUE))
+  
+cat("\n","confusion matrix","\n","\n")
+  
+tbfinal = table(pred.treefinal[,2], fraud_balanced_test$is_fraud)
+  
+print(tbfinal)
+  
+cat("\n","false positive percentage","\n", "\n")
+  
+print((tbfinal[2,1]/sum(tbfinal))*100)
+```
+
+Visual representation of New Frauds vs Old Frauds
+
+```{r}
+fraud_balanced_test$predicted = pred.treefinal[,2]
+new_fraud = fraud_balanced_test[fraud_balanced_test$is_fraud==0 & fraud_balanced_test$predicted==1,]
+old_fraud = fraud_balanced_test[fraud_balanced_test$is_fraud==1,]
+old_fraud = old_fraud[sample(nrow(old_fraud),nrow(new_fraud)),]
+```
+
+Comparison between Model distribution.
+
+```{r}
+plot1 = ggplot(new_fraud, aes(x = model)) + geom_bar(fill = "violet") + theme(axis.text.x = element_text(size  = 8, angle = 45, hjust = 1, vjust = 1)) + ggtitle("Models of New Frauds") + rremove("y.text") + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks")
+
+plot2 = ggplot(old_fraud, aes(x = model)) + geom_bar(fill = "yellow") + theme(axis.text.x = element_text(size  = 8, angle = 45, hjust = 1, vjust = 1)) + ggtitle("Models of Old Frauds") + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks")
+
+grid.arrange(plot1, plot2, ncol=2)
+```
+
+Comparison between Damage Reason distribution.
+
+```{r}
+plot1 = ggplot(new_fraud, aes(x = settlement_reason)) + geom_bar(fill = "violet") + theme(axis.text.x = element_text(size  = 8, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Damage Reason of New Frauds") + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks")
+
+plot2 = ggplot(old_fraud, aes(x = settlement_reason)) + geom_bar(fill = "yellow") + theme(axis.text.x = element_text(size  = 8, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Damage Reason of Old Frauds") + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks")
+
+grid.arrange(plot1, plot2, ncol=2)
+```
+
+Comparison between Status Before Closed distribution.
+
+```{r}
+plot1 = ggplot(new_fraud, aes(x = status_before_closed)) + geom_bar(fill = "violet") + theme(axis.text.x = element_text(size  = 8, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Status Before Closed of New Frauds") + rremove("xlab") + rremove("ylab") + rremove("grid") 
+
+plot2 = ggplot(old_fraud, aes(x = status_before_closed)) + geom_bar(fill = "yellow") + theme(axis.text.x = element_text(size  = 8, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Status Before Closed of Old Frauds") + rremove("xlab") + rremove("ylab") + rremove("grid") 
+
+grid.arrange(plot1, plot2, ncol=2)
+```
+
+Comparison between Contract Status distribution.
+
+```{r}
+plot1 = ggplot(new_fraud, aes(x = contract_status)) + geom_bar(fill = "violet") + theme(axis.text.x = element_text(size  = 8, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Contract Status of New Frauds") + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks")
+
+plot2 = ggplot(old_fraud, aes(x = contract_status)) + geom_bar(fill = "yellow") + theme(axis.text.x = element_text(size  = 8, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Contract Status of Old Frauds") + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks")
+
+grid.arrange(plot1, plot2, ncol=2)
+```
+
+Comparison between Proof of Purchase Required distribution.
+
+```{r}
+plot1 = ggplot(new_fraud, aes(x = proof_purchase_required)) + geom_bar(fill = "violet") + theme(axis.text.x = element_text(size  = 15, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Proof of Purchase New Frauds") + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks")
+
+plot2 = ggplot(old_fraud, aes(x = proof_purchase_required)) + geom_bar(fill = "yellow") + theme(axis.text.x = element_text(size  = 15, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Proof of Purchase Old Frauds") + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks")
+
+grid.arrange(plot1, plot2, ncol=2)
+```
+
+Comparison between Pictures of Damage Required distribution.
+
+```{r}
+plot1 = ggplot(new_fraud, aes(x = pictures_damage_required)) + geom_bar(fill = "violet") + theme(axis.text.x = element_text(size  = 15, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Pictures of Damage New Frauds") + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks") 
+
+plot2 = ggplot(old_fraud, aes(x = pictures_damage_required)) + geom_bar(fill = "yellow") + theme(axis.text.x = element_text(size  = 15, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Pictures of Damage Old Frauds")  + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks") 
+
+grid.arrange(plot1, plot2, ncol=2)
+```
+
+Comparison between Claim Caused By distribution.
+
+```{r}
+plot1 = ggplot(new_fraud, aes(x = claim_caused_by)) + geom_bar(fill = "violet") + theme(axis.text.x = element_text(size  = 15, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Claim Caused By of New Frauds") + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks") 
+
+plot2 = ggplot(old_fraud, aes(x = claim_caused_by)) + geom_bar(fill = "yellow") + theme(axis.text.x = element_text(size  = 15, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Claim Caused By of Old Frauds")  + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks")
+
+grid.arrange(plot1, plot2, ncol=2)
+```
+
+Comparison between Claim Created By distribution.
+
+```{r}
+plot1 = ggplot(new_fraud, aes(x = claim_created_by)) + geom_bar(fill = "violet") + theme(axis.text.x = element_text(size  = 8, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Claim Created By of New Frauds") + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks")
+
+plot2 = ggplot(old_fraud, aes(x = claim_created_by)) + geom_bar(fill = "yellow") + theme(axis.text.x = element_text(size  = 8, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Claim Created By of Old Frauds")  + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks")
+
+grid.arrange(plot1, plot2, ncol=2)
+```
+
+Comparison between Customer Language distribution.
+
+```{r}
+plot1 = ggplot(new_fraud, aes(x = customer_language)) + geom_bar(fill = "violet") + theme(axis.text.x = element_text(size  = 8, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Customer Language of New Frauds") + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks")
+
+plot2 = ggplot(old_fraud, aes(x = customer_language)) + geom_bar(fill = "yellow") + theme(axis.text.x = element_text(size  = 8, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Customer Language By of Old Frauds")  + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks")
+
+grid.arrange(plot1, plot2, ncol=2)
+```
+
+Comparison between Make distribution.
+
+```{r}
+plot1 = ggplot(new_fraud, aes(x = make)) + geom_bar(fill = "violet") + theme(axis.text.x = element_text(size  = 8, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Make of New Frauds") + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks")
+
+plot2 = ggplot(old_fraud, aes(x = make)) + geom_bar(fill = "yellow") + theme(axis.text.x = element_text(size  = 8, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Make of Old Frauds")  + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks")
+
+grid.arrange(plot1, plot2, ncol=2)
+```
+
+Comparison between Product Name distribution.
+
+```{r}
+plot1 = ggplot(new_fraud, aes(x = product_name)) + geom_bar(fill = "violet") + theme(axis.text.x = element_text(size  = 8, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Product Name of New Frauds") + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks")
+
+plot2 = ggplot(old_fraud, aes(x = product_name)) + geom_bar(fill = "yellow") + theme(axis.text.x = element_text(size  = 8, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Product Name of Old Frauds")  + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks")
+
+grid.arrange(plot1, plot2, ncol=2)
+```
+
+Comparison between Claim Device Memory distribution.
+
+```{r}
+plot1 = ggplot(new_fraud, aes(x = "", y = claim_device_memory)) + geom_boxplot(fill='violet', color='blue') + xlab("Claim Device Memory of New Frauds") + rremove("grid") + rremove("ylab") 
+
+plot2 = ggplot(old_fraud, aes(x = "", y = claim_device_memory)) + geom_boxplot(fill='yellow', color='blue') + xlab("Claim Device Memory of Old Frauds") + rremove("grid") + rremove("ylab")
+
+grid.arrange(plot1, plot2, ncol=2)
+```
+
+Comparison between Fraud Reason distribution.
+
+```{r}
+plot1 = ggplot(new_fraud, aes(x = fraud_reason)) + geom_bar(fill = "violet") + theme(axis.text.x = element_text(size  = 8, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Fraud Reason of New Frauds") + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks")
+
+plot2 = ggplot(old_fraud, aes(x = fraud_reason)) + geom_bar(fill = "yellow") + theme(axis.text.x = element_text(size  = 8, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Fraud Reason of Old Frauds") + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks")
+
+grid.arrange(plot1, plot2, ncol=2)
+```
+
+Comparison between Claim Rejection Reason distribution.
+
+```{r}
+plot1 = ggplot(new_fraud, aes(x = claim_rejection_reason)) + geom_bar(fill = "violet") + theme(axis.text.x = element_text(size  = 8, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Claim Rejection Reason of New Frauds") + rremove("y.text") + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks")
+
+plot2 = ggplot(old_fraud, aes(x = claim_rejection_reason)) + geom_bar(fill = "yellow") + theme(axis.text.x = element_text(size  = 8, angle = 90, hjust = 1, vjust = 1)) + ggtitle("Claim Rejection Reason of Old Frauds") + rremove("y.text") + rremove("ylab") + rremove("xlab") + rremove("grid") + rremove("y.ticks")
+
+grid.arrange(plot1, plot2, ncol=2)
+```
+
+Besides the visual representation, we want to find a sort of "characterization" of frauds (both for the old ones and for the new ones) dictated by machine learning criteria. How much do the criteria used by the machine differ from the "by hand" criteria?  
+
+- We will first create a new data set, "fraud_balanced", by labelling as frauds also the new frauds in the test set and by deleting the column named "predicted".
+
+- Then we will run a cross validated lasso logistic regression as a first way to select the important features to predict the frauds. 
+
+- Finally we will run a random forest as another way to assign a measure of importance to the features needed to predict the frauds.
+
+```{r}
+fraud_balanced_test$is_fraud[fraud_balanced_test$predicted == 1] = 1
+fraud_balanced = fraud_balanced_test[,-ncol(fraud_balanced_test)]
+```
+
+Final percentage of frauds in the balanced fraud set.
+
+```{r}
+sum(fraud_balanced$is_fraud==1)*100/nrow(fraud_balanced)
+```
+
+1) Logistic regression and lasso regression  
+
+Let’s assume that the outcome (predicted variable) and predictors are denoted by Y and X respectively and the two classes of interest are denoted by + and – respectively.  We wish to model the conditional probability that the outcome Y is +, given that the input variables (predictors) are X. The conditional probability is denoted by $p(Y=+|X)$   which we’ll abbreviate as $p(X)$ since we know we are referring to the positive outcome Y=+.
+We are after the probability of class membership so we must ensure that the hypothesis function always lies between 0 and 1. The function assumed in logistic regression is:
+$$p(X) = \dfrac{\exp^{\beta_0+\beta_1 X}}{1+\exp^{\beta_0 + \beta_1 X}}$$
+An equivalent way of expressing the above equation is:
+$$\log\left(\dfrac{p(X)}{1-p(X)}\right) = \beta_0+\beta_1 X$$
+The quantity on the left is the logarithm of the odds. So, the model is a linear regression of the log-odds, sometimes called logit, and hence the name logistic regression.  
+The problem is to find the values of $\beta_0$  and $\beta_1$ that results in a $p(X)$ that most accurately classifies all the observed data points – that is, those that belong to the positive class have a probability as close as possible to 1 and those that belong to the negative class have a probability as close as possible to 0. One way to frame this problem is to say that we wish to maximize the product of these probabilities, often referred to as the likelihood:
+$${\prod_{i:Y_i=+} p(X_{i}) \prod_{j:Y_j=-}(1-p(X_{j}))}$$
+where $\prod$ represents the products over i and j, which run over the +ve and –ve classed points respectively. This approach, called maximum likelihood estimation, is quite common in many machine learning settings, especially those involving probabilities. In practice one works with the log of the likelihood, because it is easier to work with mathematically. Moreover, one minimizes the negative log likelihood which, of course, is the same as maximizing the log likelihood.  The quantity one minimizes is thus:
+$$L = -\log\left( {\prod_{i:Y_i=+} p(X_{i}) \prod_{j:Y_j=-}(1-p(X_{j}))}\right)$$
+Ridge and Lasso regularization work by adding a penalty term to the log likelihood function.  In the case of ridge regression, the penalty term is $\beta_1^2$ and in the case of lasso, it is $|\beta_1|$, where $\beta_1$ is a vector, with as many components as there are predictors.  
+The quantity to be minimized in the two cases is thus:
+$$L +\lambda \sum \beta_1^2$$ 
+for ridge regression and
+$$L +\lambda \sum |\beta_1|$$
+for lasso regression, where $\lambda$ is a free parameter which is usually selected in such a way that the resulting model minimizes the out of sample error.  
+In the case of ridge regression, the effect of the penalty term is to reduce the coefficients that contribute most to the error. In other words, it reduces the magnitude of the coefficients that contribute to increasing L. In contrast, in  the case of lasso regression, the effect of the penalty term is to set the these coefficients exactly to zero. So Lasso regression works like a feature selector that picks out the most important coefficients, i.e. those that are most predictive, in other words that have the lowest p-values. (The p-value for each term tests the null hypothesis that the coefficient is equal to zero, i.e. no effect on the outcome. A low p-value, < 0.05, indicates that one can reject the null hypothesis. In other words, a predictor that has a low p-value is likely to be a meaningful addition to the model because changes in the predictor's value are related to changes in the response variable).  
+Ridge and Lasso are regularization tecniques used to reduce the complexity of the model. Now, since the size of coefficients increase exponentially with increase in model complexity, putting a constraint on the magnitude of coefficients (as in Ridge and Lasso) is one of the ways to reduce model complexity. Note that a large coefficient means that we are putting a lot of emphasis on that feature, i.e. the particular feature is a good predictor for the outcome. So, when the coefficient becomes too large, the algorithm starts modelling intricate relations to estimate the output and ends up overfitting to the particular training data.  
+
+```{r}
+fraud_balanced = fraud_balanced[sample(nrow(fraud_balanced)),]
+
+drops = c("device_type","claim_number","claim_id","claim_device_memory","claim_created_by","customer_number","contract_number","claim_date","device_creation_date","reported_at","what_happened","claim_scene","city","claim_type","claim_caused_by","contract_status","pictures_damage_required","proof_purchase_required")
+
+fraud_balanced = fraud_balanced[,!(names(fraud_balanced) %in% drops)]
+
+folds = cut(seq(1,nrow(fraud_balanced)),breaks=5,labels=FALSE)
+
+ac = c()
+
+for(i in 1:5){
+  
+  testIndexes = which(folds==i,arr.ind=TRUE)
+  
+  testData = fraud_balanced[testIndexes, ]
+  
+  trainData = fraud_balanced[-testIndexes, ]
+  
+  x_train = model.matrix(is_fraud~ ., data=trainData,contrasts.arg=lapply(trainData, contrasts, contrasts=FALSE))
+
+  y_train = trainData$is_fraud
+
+  lasso = glmnet(x_train,y_train, family = "binomial", alpha=1, lambda=0.01) # alpha=0 for ridge, alpha=1 for lasso
+
+  cat("\n","coefficients for fold", i,"\n", "\n")
+  
+  print(coef(lasso))
+  
+  print(lasso)
+  
+  x_test = model.matrix(is_fraud~ ., data=testData,contrasts.arg=lapply(testData, contrasts, contrasts=FALSE))
+  
+  lasso_prob = predict(lasso, newx = x_test, type="response")
+
+  #translate probabilities to predictions
+  
+  predlasso = ifelse(lasso_prob>.5, 1, 0)
+  
+  cat("\n","confusion matrix for fold", i,"\n", "\n")
+  
+  print(table(pred=predlasso,true=testData$is_fraud))
+  
+  cat("\n","accuracy for fold", i,"\n", "\n")
+  
+  print(mean(predlasso==testData$is_fraud))
+  
+  ac = c(ac,mean(predlasso==testData$is_fraud))
+}
+
+cat("\n","mean accuracy","\n", "\n")
+
+print(mean(ac))
+```
+
+The mean accuracy reached with 5 folds lasso regression is high, `r mean(ac)`, and the most recurrent non zero levels are "claim_rejection_reason = Device not insured", "fraud_reason = unknown", "claim_rejection_reason = unknown", "claim_rejection_reason = Incomplete Information", "claim_rejection_reason = Unauthorized Person" and "status_before_closed = AUTO_ABANDONED". It is interesting to note that, with respect to the "by hand" detection, there are new levels of the column fraud_reason and claim_rejection_reason considered important to detect frauds in the balanced data set: of course "fraud_reason = unknown" and "claim_rejection_reason = unknown" but also "claim_rejection_reason = device not insured", that had been forgotten in the "by hand" detection. By increasing/decreasing the value of lambda, we decrease/increase the number of zero predictors, and this helps us to understand the various "levels of importance" of the variables in predicting fraud.
+
+2) Random Forest  
+
+Random Forests is a learning method for classification (or regression) and is essentially a collection of Decision Trees. A decision tree is built on an entire data set, using all the variables of interest, whereas a random forest randomly selects rows and specific variables to build multiple decision trees from and then averages the results. After a large number of trees are built using this method, each tree "votes" or chooses the class, and the class receiving the most votes by a simple majority is the predicted class. Random forest algorithms also give measures of variable importance. For this algorithm we are using mean decrease in Gini as measure of variable importance.  
+
+When determining splits in individual trees, the algorithm looks for the largest class (in terms of population) and attempts to isolate it first. If this is not possible, it tries to do the best it can, always focusing on isolating the largest remaining class in every split. This is called the Gini splitting rule. The “goodness of split” is measured by the Gini Impurity, $I_{G}$. For a set containing $K$ categories this is given by:
+$$I_{G} = \sum_{i=1}^{K} f_{i}(1-f_{i})$$
+where $f_{i}$ is the fraction of the set that belongs to the $i_{th}$ category. Clearly, $I_{G}$  is 0 when the set is homogeneous or pure (1 class only) and is maximum when classes are equiprobable (for example, in a two class set the maximum occurs when $f_{1}$ and $f_{2}$ are 0.5). At each stage the algorithm chooses to split on the predictor that leads to the largest decrease in $I_{G}$. The algorithm tracks this decrease for each predictor for all splits and all trees in the forest. The average is reported as the mean decrease in Gini.
+
+```{r}
+fraud_balanced = fraud_balanced[sample(nrow(fraud_balanced)),]
+
+drops = c("device_type","claim_number","claim_id","claim_device_memory","customer_number","contract_number","claim_date","device_creation_date","reported_at","what_happened","claim_scene","city")
+
+fraud_balanced = fraud_balanced[,!(names(fraud_balanced) %in% drops)]
+
+folds = cut(seq(1,nrow(fraud_balanced)),breaks=5,labels=FALSE)
+
+ac = c()
+
+for(i in 1:5){
+  
+  testIndexes = which(folds==i,arr.ind=TRUE)
+  
+  testData = fraud_balanced[testIndexes, ]
+  
+  trainData = fraud_balanced[-testIndexes, ]
+  
+  Random_Forest = randomForest(is_fraud ~ ., data=trainData)
+  
+  predrf = predict(Random_Forest, newdata = testData, importance=TRUE)
+
+  importance(Random_Forest, type=1)
+  
+  cat("\n","number of trees for fold", i,"\n", "\n")
+
+  print(Random_Forest$ntree)
+
+  cat("\n","variable importance for fold", i,"\n", "\n")
+  
+  #print(str(rf_classifier$importance))
+  
+  varImpPlot(Random_Forest)
+  
+  cat("\n","confusion matrix for fold", i,"\n", "\n")
+
+  tbrf = table(predrf, testData$is_fraud)
+
+  print(tbrf)
+  
+  cat("\n","accuracy for fold", i,"\n", "\n")
+  
+  print(mean(predrf==testData$is_fraud))
+  
+  ac = c(ac,mean(predrf==testData$is_fraud))
+}
+
+cat("\n","mean accuracy","\n", "\n")
+
+print(mean(ac))
+```
+
+With respect to the "by hand" detection, the Random Forest algorithm confirms that "claim_rejection_reason", "fraud_reason", "status_before_closed" are three of the most important variables to identify a fraud and also gives us new variables to keep an eye on when searching for frauds as, for example, "product name", "settlement_reason" and "costumer_language".  
