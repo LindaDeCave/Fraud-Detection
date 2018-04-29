@@ -28,7 +28,7 @@ library(randomForest)
 library(glmnet) 
 ```
 
-## (1) Loading and reading the data.
+## (1) Loading the data.
 
 ```{r}
 claims = read.table("/Users/linda/Desktop/eBay/All_Claims.txt",na.strings = c("", "NA")) 
@@ -106,22 +106,6 @@ Sparse columns.
 for (i in 1:ncol(claims)){
   if((sum(is.na(claims[,i]))/nrow(claims))*100>50){print(names(claims)[i])}
 }
-```
-
-Creating a data frame with the factor columns, one with the integer columns and one with the numeric columns.
-
-```{r}
-factorcol = sapply(claims,is.factor)
-
-factorclaims = claims[,factorcol]
-
-intcol = sapply(claims,is.integer)
-
-intclaims = claims[,intcol]
-
-numcol = sapply(claims,is.numeric)
-
-numclaims = claims[,numcol]
 ```
 
 Is the "fraud-reason" column empty?
@@ -1023,7 +1007,8 @@ The decision tree for $T$ consists of a decision node identifying the test and o
 
 Training phase: training data (with paired input/output) are fed to the model to train it.  
 Test phase: test data are used to estimate the accuracy of the selected approach.   
-The function createDataPartition can be used to create splits of the data in such a way that, if the y argument to this function is a factor, the random sampling occurs within each class and should preserve the overall class distribution of the data.  
+
+The function createDataPartition can be used to create splits of the data in such a way that, if the y argument of this function is a factor, the random sampling occurs within each class and should preserve the overall class distribution of the data.  
 The 70% of the data will go to the training set.
 
 ```{r}
